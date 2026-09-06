@@ -1,0 +1,115 @@
+name: Omi bottom navigation regression
+
+on:
+  push:
+    branches:
+      - ci/omi-12352-widget-20260906
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  widget-regression:
+    if: github.repository == 'woahwhattheheck/omi'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout exact PR workload
+        uses: actions/checkout@v7
+        with:
+          ref: cc424f490047ef7152c54592f5619fa4dde05c83
+          fetch-depth: 3
+          filter: blob:none
+          persist-credentials: false
+
+      - name: Record workload identity
+        run: |
+          test "$(git rev-parse HEAD)" = cc424f490047ef7152c54592f5619fa4dde05c83
+          git rev-parse HEAD
+          git diff --stat 8e8fb67bfb5173d4927a7f5f1c72ec2abacddf8f HEAD
+
+      - name: Setup repository-pinned Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: 3.44.5
+          cache: true
+
+      - name: Resolve Flutter dependencies
+        working-directory: app
+        run: flutter pub get
+
+      - name: Prepare repository-standard hermetic compile inputs
+        working-directory: app
+        run: |
+          cp lib/firebase_options_local.dart lib/firebase_options_dev.dart
+          cp lib/firebase_options_local.dart lib/firebase_options_prod.dart
+          {
+            echo "API_BASE_URL="
+            echo "USE_WEB_AUTH=true"
+            echo "USE_AUTH_CUSTOM_TOKEN=true"
+            echo "STAGING_API_URL="
+          } > .dev.env
+          : > .env
+
+      - name: Generate Flutter code
+        working-directory: app
+        run: dart run build_runner build --delete-conflicting-outputs
+
+      - name: Run complete bottom navigation widget test file
+        working-directory: app
+        run: |
+          set -o pipefail
+          bash test.sh test/widgets/bottom_nav_bar_test.dart \
+            --reporter expanded \
+            --file-reporter "json:$GITHUB_WORKSPACE/widget-results.json" \
+            2>&1 | tee "$GITHUB_WORKSPACE/widget-output.log"
+
+      - name: Prove the new assertion detects the original inset bug
+        working-directory: app
+        run: |
+          git show 8e8fb67bfb5173d4927a7f5f1c72ec2abacddf8f:app/lib/widgets/bottom_nav_bar.dart > lib/widgets/bottom_nav_bar.dart
+          set +e
+          set -o pipefail
+          flutter test test/widgets/bottom_nav_bar_test.dart \
+            --plain-name "keeps the tab row clear of the system navigation bar inset" \
+            --reporter expanded \
+            --file-reporter "json:$GITHUB_WORKSPACE/baseline-results.json" \
+            2>&1 | tee "$GITHUB_WORKSPACE/baseline-output.log"
+          baseline_status=${PIPESTATUS[0]}
+          set -e
+          test "$baseline_status" -ne 0
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          path = Path(os.environ['GITHUB_WORKSPACE']) / 'baseline-results.json'
+          events = [json.loads(line) for line in path.read_text().splitlines()]
+          test_ids = {
+              event['test']['id'] for event in events
+              if event.get('type') == 'testStart'
+              and event['test']['name'] == 'keeps the tab row clear of the system navigation bar inset'
+          }
+          expected_error = any(
+              event.get('type') == 'error'
+              and event.get('testID') in test_ids
+              and 'must not be drawn behind the system navigation bar' in str(event.get('error', ''))
+              for event in events
+          )
+          assert expected_error, 'Baseline failed without the expected inset-clearance assertion'
+          print('Confirmed: the original widget fails the new inset-clearance assertion.')
+          PY
+
+      - name: Upload executed test evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: omi-12352-widget-evidence
+          path: |
+            widget-results.json
+            widget-output.log
+            baseline-results.json
+            baseline-output.log
+          if-no-files-found: warn

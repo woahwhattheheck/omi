@@ -21,13 +21,34 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  deploy:
+  deployment_capability:
     if: >-
       github.event.workflow_run.conclusion == 'success' &&
       github.event.workflow_run.event == 'push' &&
       github.event.workflow_run.run_attempt == 1 &&
       github.event.workflow_run.head_branch == 'main' &&
       github.event.workflow_run.head_repository.full_name == github.repository
+    environment: development
+    permissions: {}
+    runs-on: ubuntu-latest
+    outputs:
+      available: ${{ steps.credentials.outputs.available }}
+    steps:
+      - name: Detect GCP deployment credentials
+        id: credentials
+        env:
+          GCP_CREDENTIALS: ${{ secrets.GCP_CREDENTIALS }}
+        run: |
+          if [[ -n "$GCP_CREDENTIALS" ]]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "GCP deployment skipped because GCP_CREDENTIALS is unavailable." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+  deploy:
+    needs: deployment_capability
+    if: needs.deployment_capability.outputs.available == 'true'
     environment: development
     permissions:
       actions: 'read'

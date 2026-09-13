@@ -1,1 +1,54 @@
-PLACEHOLDER
+name: Build Desktop Release Candidate
+
+on:
+  # The hourly release train: at most one candidate per hour, coalescing every
+  # merge since the last tag. Schedule and manual dispatch use the same
+  # throttle; a retry must never create a second candidate inside the hour.
+  schedule:
+    - cron: "7 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release-capability:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      available: ${{ steps.credentials.outputs.available }}
+    steps:
+      - name: Detect Omi Bot credentials
+        id: credentials
+        env:
+          OMI_BOT_APP_ID: ${{ secrets.OMI_BOT_APP_ID }}
+          OMI_BOT_PRIVATE_KEY: ${{ secrets.OMI_BOT_PRIVATE_KEY }}
+        run: |
+          if [[ -n "$OMI_BOT_APP_ID" && -n "$OMI_BOT_PRIVATE_KEY" ]]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "Desktop release skipped because Omi Bot credentials are unavailable." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+  plan-and-tag:
+    needs: release-capability
+    if: needs.release-capability.outputs.available == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    concurrency:
+      group: desktop-release-planner-main
+      cancel-in-progress: false
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Generate Omi Bot token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.OMI_BOT_APP_ID }}
+          private-key: ${{ secrets.OMI_BOT_PRIVATE_KEY }}

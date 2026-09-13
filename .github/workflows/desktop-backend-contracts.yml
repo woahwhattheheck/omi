@@ -23,6 +23,10 @@ on:
       - "desktop/macos/Desktop/Sources/MainWindow/Pages/MemoriesPage.swift"
       - "desktop/macos/Desktop/Sources/Rewind/Core/RewindArtifactGauntlet.swift"
 
+concurrency:
+  group: desktop-backend-contracts-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
 jobs:
   desktop-core-e2e-t0:
     runs-on: ubuntu-latest

@@ -27,7 +27,8 @@ jobs:
       github.event.workflow_run.event == 'push' &&
       github.event.workflow_run.run_attempt == 1 &&
       github.event.workflow_run.head_branch == 'main' &&
-      github.event.workflow_run.head_repository.full_name == github.repository
+      github.event.workflow_run.head_repository.full_name == github.repository &&
+      secrets.GCP_CREDENTIALS != ''
     environment: development
     permissions:
       actions: 'read'
@@ -201,7 +202,7 @@ jobs:
 
       - name: Provision daily Scheduler trigger from admitted source
         run: |
-          python3 backend/scripts/provision_day3_reengagement_scheduler.py \
+          python3 backend/scripts.provision_day3_reengagement_scheduler.py \
             --project "${{ vars.GCP_PROJECT_ID }}" \
             --region "$REGION" \
             --scheduler-job "$SCHEDULER_JOB" \

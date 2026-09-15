@@ -99,7 +99,19 @@ jobs:
         run: |
           set -euo pipefail
           title='Desktop proactive delivery health alarm'
-          issue_number="$(gh issue list --repo "$REPO" --state open --limit 100 --json number,title --jq '.[] | select(.title == "Desktop proactive delivery health alarm") | .number' | head -n 1)"
+          set +e
+          list_err=$(mktemp)
+          issue_number="$(gh issue list --repo "$REPO" --state open --limit 100 --json number,title --jq '.[] | select(.title == "Desktop proactive delivery health alarm") | .number' 2>"$list_err" | head -n 1)"
+          list_status=$?
+          set -e
+          if [[ "$list_status" -ne 0 ]]; then
+            if grep -qi 'disabled issues' "$list_err"; then
+              echo "Issues are disabled on $REPO; leaving the alarm in this workflow run only."
+              exit 0
+            fi
+            cat "$list_err" >&2
+            exit "$list_status"
+          fi
 
           if [[ "$HEALTH_STATUS" == 'healthy' ]]; then
             if [[ -n "$issue_number" ]]; then
@@ -162,7 +174,19 @@ jobs:
         run: |
           set -euo pipefail
           title='Desktop beta freshness alarm'
-          issue_number="$(gh issue list --repo "$REPO" --state open --limit 100 --json number,title --jq '.[] | select(.title == "Desktop beta freshness alarm") | .number' | head -n 1)"
+          set +e
+          list_err=$(mktemp)
+          issue_number="$(gh issue list --repo "$REPO" --state open --limit 100 --json number,title --jq '.[] | select(.title == "Desktop beta freshness alarm") | .number' 2>"$list_err" | head -n 1)"
+          list_status=$?
+          set -e
+          if [[ "$list_status" -ne 0 ]]; then
+            if grep -qi 'disabled issues' "$list_err"; then
+              echo "Issues are disabled on $REPO; leaving the freshness alarm in this workflow run only."
+              exit 0
+            fi
+            cat "$list_err" >&2
+            exit "$list_status"
+          fi
 
           if [[ "$FRESHNESS_EXIT" == '0' ]]; then
             if [[ -n "$issue_number" ]]; then
@@ -184,4 +208,7 @@ jobs:
 
       - name: Fail on stale beta
         if: always() && steps.freshness.outputs.exit_code != '0'
-        run: exit 1
+        run: |
+          echo "Beta freshness is still stale. That is expected until a candidate tag ships."
+          echo "This job still fails so the monitor stays visible after issues-disabled noise is gone."
+          exit 1

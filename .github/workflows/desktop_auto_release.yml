@@ -126,11 +126,19 @@ jobs:
           set -euo pipefail
           VERSION="${{ steps.version.outputs.version }}"
           PLANNED_SOURCE_SHA="${{ steps.plan.outputs.source_sha }}"
+          # A version-only changelog branch can belong to an earlier planner
+          # source after a retry. Binding the branch to the immutable source
+          # avoids rewriting that stale branch or confusing its PR with this
+          # candidate; published tags are never touched by this recovery path.
           BRANCH="changelog/v${VERSION}-${PLANNED_SOURCE_SHA:0:12}"
 
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
+          # Partial candidate tagging recovery: changelog may already be on main while
+          # the planned-source branch tip is an orphan rewrite. Prefer a
+          # main-reachable consolidate commit. Always drop consolidate dirt
+          # before any branch checkout so reuse cannot fail on a dirty tree.
           git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
           git reset --hard HEAD
           git clean -fd -- desktop/macos/CHANGELOG.json desktop/macos/changelog || true
@@ -153,6 +161,7 @@ jobs:
           if [ -n "$BRANCH_TIP" ]; then
             RESOLVE_ARGS+=(--branch-tip "$BRANCH_TIP")
           fi
+          # Capture resolve into step outputs via GITHUB_OUTPUT.
           RESOLVE_OUT="$RUNNER_TEMP/desktop-changelog-resolve-outputs.txt"
           : > "$RESOLVE_OUT"
           GITHUB_OUTPUT="$RESOLVE_OUT" "${RESOLVE_ARGS[@]}"
@@ -163,10 +172,14 @@ jobs:
           RESOLVE_ON_MAIN="$(grep '^already_on_main=' "$RESOLVE_OUT" | tail -1 | cut -d= -f2-)"
 
           if [ "$RESOLVE_MODE" = "stale-orphan" ]; then
+            # A manually squash-merged or otherwise orphaned sync branch must
+            # not poison every retry (incident #11936). Keep the stale ref for
+            # audit and publish a run-qualified recovery branch instead.
             BRANCH="${BRANCH}-recovery-${GITHUB_RUN_ID}"
           fi
 
           if [ -n "$RESOLVE_COMMIT" ]; then
+            # Reuse only the exact-parent consolidate selected by the resolver.
             test "$(git rev-parse "${RESOLVE_COMMIT}^1")" = "$PLANNED_SOURCE_SHA"
             git checkout -B "$BRANCH" "$RESOLVE_COMMIT"
             {
@@ -182,6 +195,7 @@ jobs:
             exit 0
           fi
 
+          # Fresh consolidate path: rebuild from the planned source tree.
           git checkout --detach "$PLANNED_SOURCE_SHA"
           TODAY=$(date -u +%Y-%m-%d)
           python3 .github/scripts/desktop-changelog.py consolidate \
@@ -190,6 +204,7 @@ jobs:
             --write
           git add desktop/macos/CHANGELOG.json desktop/macos/changelog
           if git diff --cached --quiet; then
+            # Nothing to PR. Direct tag path admits later non-desktop main commits.
             echo "changed=false" >> "$GITHUB_OUTPUT"
             echo "already_on_main=false" >> "$GITHUB_OUTPUT"
             echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
@@ -227,6 +242,8 @@ jobs:
           BRANCH="${{ steps.changelog.outputs.branch }}"
           CHANGELOG_COMMIT="${{ steps.changelog.outputs.commit }}"
 
+          # Changelog already on main from a partial prior candidate tag: do not
+          # open a second PR. Reuse the merge commit + PR URL from resolve.
           if [ "${{ steps.changelog.outputs.already_on_main }}" = "true" ]; then
             PR_URL="${{ steps.changelog.outputs.pr_url }}"
             MERGED_MAIN_SHA="${{ steps.changelog.outputs.merged_main_sha }}"
@@ -270,6 +287,11 @@ jobs:
 
           PR_STATE=$(gh pr view "$PR_NUMBER" --json state --jq '.state')
           if [ "$PR_STATE" != "MERGED" ]; then
+            # main branch policy blocks ordinary merges. Use admin override so
+            # the Omi Bot can sync the changelog without waiting on checks.
+            # Do not fall back to a non-admin merge: a transient --admin failure
+            # (e.g. HTTP 502) would otherwise retry without override and fail
+            # on branch policy (see run 30581710658 / PR #10910).
             merge_ok=0
             for attempt in 1 2 3; do
               if gh pr merge "$PR_NUMBER" --admin --merge; then
@@ -358,6 +380,9 @@ jobs:
             echo "Omi Bot token not available; cannot publish a candidate tag." >&2
             exit 1
           fi
+          # The publisher verifies the exact candidate is still reachable
+          # from authoritative GitHub main. Later merges belong to the next
+          # train; an unmerged candidate or existing tag still fails closed.
           python3 .github/scripts/publish-desktop-candidate-tag.py \
             --repository "${{ github.repository }}" \
             --release-tag "$RELEASE_TAG" \
@@ -372,6 +397,9 @@ jobs:
         env:
           CODEMAGIC_API_TOKEN: ${{ secrets.CODEMAGIC_API_TOKEN }}
         run: |
+          # Codemagic's automatic tag trigger is disabled for this workflow.
+          # One all-state exact-tag query fences retries, then the helper posts
+          # at most one API build and verifies its immutable source identity.
           python3 .github/scripts/check-codemagic-tag-intake.py \
             --app-id "66c95e6ec76853c447b8bcbb" \
             --workflow-id "omi-desktop-swift-release" \

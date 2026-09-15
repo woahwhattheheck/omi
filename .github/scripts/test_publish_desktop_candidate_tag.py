@@ -45,7 +45,10 @@ class PublishDesktopCandidateTagTests(unittest.TestCase):
         self.assertEqual(job.count("token: ${{ steps.app-token.outputs.token }}"), 2)
         self.assertIn("Dispatch or reuse the exact-tag Codemagic build", job)
         self.assertIn("check-codemagic-tag-intake.py", job)
-        self.assertIn("if: always() && steps.plan.outputs.should_release == 'true'", job)
+        self.assertIn(
+            "if: always() && steps.bot-creds.outputs.available == 'true' && steps.plan.outputs.should_release == 'true'",
+            job,
+        )
 
     def test_git_transport_publishes_a_timestamped_annotated_tag(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

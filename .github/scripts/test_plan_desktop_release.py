@@ -636,7 +636,10 @@ class DesktopCandidateSourceCheckTests(unittest.TestCase):
         self.assertNotIn("Replan release source after changelog sync", workflow)
         self.assertNotIn("Select final release plan", workflow)
         self.assertIn('PLANNED_SOURCE_SHA="${{ steps.plan.outputs.source_sha }}"', workflow)
-        self.assertIn("if: steps.plan.outputs.should_release == 'true'", workflow)
+        self.assertIn(
+            "if: steps.bot-creds.outputs.available == 'true' && steps.plan.outputs.should_release == 'true'",
+            workflow,
+        )
         self.assertIn("python3 .github/scripts/publish-desktop-candidate-tag.py", workflow)
         self.assertIn("python3 .github/scripts/check-codemagic-tag-intake.py", workflow)
         self.assertIn("--timeout-seconds 0", workflow)

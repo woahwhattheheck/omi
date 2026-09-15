@@ -25,7 +25,22 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Check Omi Bot credentials
+        id: bot-creds
+        env:
+          APP_ID: ${{ secrets.OMI_BOT_APP_ID }}
+          PRIVATE_KEY: ${{ secrets.OMI_BOT_PRIVATE_KEY }}
+        run: |
+          if [[ -n "${APP_ID:-}" && -n "${PRIVATE_KEY:-}" ]]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "OMI_BOT_APP_ID / OMI_BOT_PRIVATE_KEY are unset."
+            echo "Skipping tag minting so scheduled runs stay green without those secrets."
+          fi
+
       - name: Generate Omi Bot token
+        if: steps.bot-creds.outputs.available == 'true'
         id: app-token
         uses: actions/create-github-app-token@v3
         with:
@@ -33,6 +48,7 @@ jobs:
           private-key: ${{ secrets.OMI_BOT_PRIVATE_KEY }}
 
       - name: Plan desktop release
+        if: steps.bot-creds.outputs.available == 'true'
         id: plan
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
@@ -43,20 +59,21 @@ jobs:
             --codemagic-source-gate
 
       - name: Show release plan
+        if: steps.bot-creds.outputs.available == 'true'
         run: echo "${{ steps.plan.outputs.reason }}"
 
       # The native tag must be pushed by the Omi Bot installation, rather than
       # the workflow's GITHUB_TOKEN. GitHub suppresses recursively generated
       # events for GITHUB_TOKEN, which leaves Codemagic no tag webhook to build.
       - name: Checkout with Omi Bot token
-        if: steps.plan.outputs.should_release == 'true'
+        if: steps.bot-creds.outputs.available == 'true' && steps.plan.outputs.should_release == 'true'
         uses: actions/checkout@v7
         with:
           fetch-depth: 0
           token: ${{ steps.app-token.outputs.token }}
 
       - name: Checkout exact releasable desktop source
-        if: steps.plan.outputs.should_release == 'true'
+        if: steps.bot-creds.outputs.available == 'true' && steps.plan.outputs.should_release == 'true'
         uses: actions/checkout@v7
         with:
           ref: ${{ steps.plan.outputs.source_sha }}
@@ -64,7 +81,7 @@ jobs:
           token: ${{ steps.app-token.outputs.token }}
 
       - name: Compute next version and consolidate changelog
-        if: steps.plan.outputs.should_release == 'true'
+        if: steps.bot-creds.outputs.available == 'true' && steps.plan.outputs.should_release == 'true'
         id: version
         run: |
           # Get latest desktop release tag
@@ -101,7 +118,7 @@ jobs:
             --write
 
       - name: Commit changelog and prepare sync branch
-        if: steps.plan.outputs.should_release == 'true'
+        if: steps.bot-creds.outputs.available == 'true' && steps.plan.outputs.should_release == 'true'
         id: changelog
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
@@ -210,7 +227,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Create and regular-merge PR to sync changelog back to main
-        if: steps.plan.outputs.should_release == 'true' && steps.changelog.outputs.changed == 'true'
+        if: steps.bot-creds.outputs.available == 'true' && steps.plan.outputs.should_release == 'true' && steps.changelog.outputs.changed == 'true'
         id: changelog-pr
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
@@ -301,7 +318,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Bind immutable planner evidence to merged release source
-        if: steps.plan.outputs.should_release == 'true'
+        if: steps.bot-creds.outputs.available == 'true' && steps.plan.outputs.should_release == 'true'
         id: identity
         run: |
           set -euo pipefail
@@ -341,7 +358,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Retain immutable planner source evidence
-        if: steps.plan.outputs.should_release == 'true'
+        if: steps.bot-creds.outputs.available == 'true' && steps.plan.outputs.should_release == 'true'
         uses: actions/upload-artifact@v7
         with:
           name: desktop-release-planner-source-identity-${{ steps.version.outputs.release_tag }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -350,7 +367,7 @@ jobs:
           overwrite: false
 
       - name: Publish immutable tag from merged release source
-        if: steps.plan.outputs.should_release == 'true'
+        if: steps.bot-creds.outputs.available == 'true' && steps.plan.outputs.should_release == 'true'
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
@@ -376,7 +393,7 @@ jobs:
           test "$(git rev-parse "$RELEASE_TAG^{commit}")" = "$CANDIDATE_SHA"
 
       - name: Dispatch or reuse the exact-tag Codemagic build
-        if: steps.plan.outputs.should_release == 'true'
+        if: steps.bot-creds.outputs.available == 'true' && steps.plan.outputs.should_release == 'true'
         env:
           CODEMAGIC_API_TOKEN: ${{ secrets.CODEMAGIC_API_TOKEN }}
         run: |
@@ -394,7 +411,7 @@ jobs:
             --evidence "$RUNNER_TEMP/codemagic-native-tag-intake.json"
 
       - name: Retain native Codemagic tag intake evidence
-        if: always() && steps.plan.outputs.should_release == 'true'
+        if: always() && steps.bot-creds.outputs.available == 'true' && steps.plan.outputs.should_release == 'true'
         uses: actions/upload-artifact@v7
         with:
           name: codemagic-native-tag-intake-${{ steps.version.outputs.release_tag }}-${{ github.run_id }}-${{ github.run_attempt }}

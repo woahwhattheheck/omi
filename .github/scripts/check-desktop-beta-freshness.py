@@ -176,7 +176,21 @@ def diagnose_promotion_lag(repository: str, tag: str, tag_sha: str) -> str:
     )
 
 
-def evaluate(*, repository: str) -> tuple[int, list[str]]:
+def _parse_bool_flag(value: str) -> bool:
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes"}:
+        return True
+    if normalized in {"0", "false", "no"}:
+        return False
+    raise argparse.ArgumentTypeError(f"expected true or false, got {value!r}")
+
+
+def is_tagging_dependent_alarm(alarm: str) -> bool:
+    """Wedged-train and promotion-lag alarms require the candidate tagging train."""
+    return alarm.startswith("Wedged train:") or alarm.startswith("Promotion lag:")
+
+
+def evaluate(*, repository: str, tagging_configured: bool = True) -> tuple[int, list[str]]:
     lines: list[str] = ["Desktop beta freshness"]
     alarms: list[str] = []
 
@@ -197,6 +211,7 @@ def evaluate(*, repository: str) -> tuple[int, list[str]]:
     lines.append(f"candidate_build={candidate_build}")
     lines.append(f"live_beta_build={live_build if live_build is not None else 'missing'}")
     lines.append(f"candidate_tag_age_seconds={tag_age if tag_age is not None else 'unknown'}")
+    lines.append(f"tagging_configured={'true' if tagging_configured else 'false'}")
 
     if live_build is None:
         alarms.append(f"beta appcast {BETA_APPCAST_URL} has no sparkle:version")
@@ -224,6 +239,16 @@ def evaluate(*, repository: str) -> tuple[int, list[str]]:
         lines.append("oldest_unreleased_main_sha=none")
 
     if alarms:
+        independent = [alarm for alarm in alarms if not is_tagging_dependent_alarm(alarm)]
+        if not tagging_configured and not independent:
+            lines.append("status=unconfigured")
+            lines.append(
+                "Tagging is unconfigured: OMI_BOT_APP_ID / OMI_BOT_PRIVATE_KEY are unset, "
+                "so this repository cannot mint a candidate tag. "
+                "Tagging-dependent freshness alarms stay visible and do not fail the doctor."
+            )
+            lines.extend(alarms)
+            return 0, lines
         lines.append("status=unhealthy")
         lines.extend(alarms)
         return 1, lines
@@ -236,13 +261,19 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repository", default=os.environ.get("GITHUB_REPOSITORY", "BasedHardware/omi"))
     parser.add_argument("--summary", type=Path)
+    parser.add_argument(
+        "--tagging-configured",
+        type=_parse_bool_flag,
+        default=True,
+        help="false when Omi Bot secrets are unset so tagging-dependent lag is unconfigured, not unhealthy",
+    )
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
     try:
-        exit_code, lines = evaluate(repository=args.repository)
+        exit_code, lines = evaluate(repository=args.repository, tagging_configured=args.tagging_configured)
     except FreshnessError as error:
         lines = [f"Desktop beta freshness failed: {error}"]
         exit_code = 1

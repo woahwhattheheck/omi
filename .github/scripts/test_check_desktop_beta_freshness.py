@@ -143,6 +143,80 @@ class FreshnessTests(unittest.TestCase):
         self.assertIn("Wedged train", joined)
         self.assertIn(MAIN_SHA, joined)
         self.assertIn("https://github.com/BasedHardware/omi/actions/runs/1", joined)
+        self.assertIn("status=unhealthy", lines)
+
+    def test_wedged_train_is_unconfigured_when_tagging_secrets_are_missing(self) -> None:
+        with (
+            patch.object(freshness.planner, "latest_desktop_tag", return_value=TAG),
+            patch.object(freshness, "fetch_beta_appcast", return_value=_appcast(12172)),
+            patch.object(freshness.planner, "tag_sha", return_value=TAG_SHA),
+            patch.object(freshness.planner, "tag_age_seconds", return_value=60),
+            patch.object(freshness, "oldest_unreleased_releasable_main_commit", return_value=(MAIN_SHA, 22_000)),
+            patch.object(freshness, "is_ancestor", return_value=False),
+            patch.object(
+                freshness,
+                "latest_auto_release_run_url",
+                return_value="https://github.com/woahwhattheheck/omi/actions/runs/34974968059",
+            ),
+        ):
+            code, lines = freshness.evaluate(repository="woahwhattheheck/omi", tagging_configured=False)
+        self.assertEqual(code, 0)
+        joined = "\n".join(lines)
+        self.assertIn("status=unconfigured", lines)
+        self.assertIn("tagging_configured=false", lines)
+        self.assertIn("Wedged train", joined)
+        self.assertNotIn("status=unhealthy", lines)
+
+    def test_promotion_lag_is_unconfigured_when_tagging_secrets_are_missing(self) -> None:
+        with (
+            patch.object(freshness.planner, "latest_desktop_tag", return_value=TAG),
+            patch.object(freshness, "fetch_beta_appcast", return_value=_appcast(12100)),
+            patch.object(freshness.planner, "tag_sha", return_value=TAG_SHA),
+            patch.object(freshness.planner, "tag_age_seconds", return_value=12_000),
+            patch.object(
+                freshness.planner,
+                "github_check_status",
+                return_value=("completed", "failure", "https://example.test/codemagic", None),
+            ),
+            patch.object(freshness, "oldest_unreleased_releasable_main_commit", return_value=(MAIN_SHA, 100)),
+            patch.object(freshness, "is_ancestor", return_value=True),
+        ):
+            code, lines = freshness.evaluate(repository=REPOSITORY, tagging_configured=False)
+        self.assertEqual(code, 0)
+        self.assertIn("status=unconfigured", lines)
+        self.assertIn("Promotion lag", "\n".join(lines))
+
+    def test_missing_appcast_version_stays_unhealthy_without_tagging_secrets(self) -> None:
+        with (
+            patch.object(freshness.planner, "latest_desktop_tag", return_value=TAG),
+            patch.object(freshness, "fetch_beta_appcast", return_value="<rss></rss>"),
+            patch.object(freshness.planner, "tag_sha", return_value=TAG_SHA),
+            patch.object(freshness.planner, "tag_age_seconds", return_value=60),
+            patch.object(freshness, "oldest_unreleased_releasable_main_commit", return_value=None),
+        ):
+            code, lines = freshness.evaluate(repository=REPOSITORY, tagging_configured=False)
+        self.assertEqual(code, 1)
+        self.assertIn("status=unhealthy", lines)
+        self.assertIn("has no sparkle:version", "\n".join(lines))
+
+    def test_doctor_workflow_skips_issue_alarms_when_issues_are_disabled(self) -> None:
+        # omi-test-quality: source-inspection -- YAML alarm publish cannot open issues on a disabled tracker.
+        workflow = Path(__file__).resolve().parent.parent / "workflows" / "desktop_release_doctor.yml"
+        text = workflow.read_text(encoding="utf-8")
+        self.assertIn("disabled issues", text)
+        self.assertIn("--tagging-configured", text)
+        self.assertIn("secrets.OMI_BOT_APP_ID", text)
+        self.assertIn("Fail on stale beta", text)
+        self.assertIn("steps.freshness.outputs.exit_code != '0'", text)
+
+    def test_auto_release_skips_token_mint_without_bot_secrets(self) -> None:
+        # omi-test-quality: source-inspection -- empty OMI_BOT_APP_ID must not reach create-github-app-token.
+        workflow = Path(__file__).resolve().parent.parent / "workflows" / "desktop_auto_release.yml"
+        text = workflow.read_text(encoding="utf-8")
+        self.assertIn("Check Omi Bot credentials", text)
+        self.assertIn("steps.bot-creds.outputs.available == 'true'", text)
+        generate = text.split("- name: Generate Omi Bot token", 1)[1]
+        self.assertLess(generate.find("if: steps.bot-creds.outputs.available == 'true'"), generate.find("uses: actions/create-github-app-token@v3"))
 
     def test_merge_churn_cannot_reset_the_oldest_unreleased_update_age(self) -> None:
         changelog_only = "1" * 40

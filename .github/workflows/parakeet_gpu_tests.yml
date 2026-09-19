@@ -25,7 +25,26 @@ env:
   JOB_NAME: parakeet-gpu-test-${{ github.run_id }}
 
 jobs:
+  gcp-credentials:
+    environment: development
+    permissions:
+      contents: 'read'
+    runs-on: ubuntu-latest
+    outputs:
+      available: ${{ steps.credentials.outputs.available }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Detect GCP credentials
+        id: credentials
+        env:
+          GCP_CREDENTIALS: ${{ secrets.GCP_CREDENTIALS }}
+        run: python3 .github/scripts/detect_gcp_credentials.py
+
   gpu-tests:
+    needs: gcp-credentials
+    if: needs.gcp-credentials.outputs.available == 'true'
     environment: development
     permissions:
       contents: 'read'

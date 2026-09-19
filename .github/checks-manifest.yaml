@@ -163,6 +163,12 @@ checks:
     lanes: ["local", "ci"]
     reason: "issue #11936: hourly freshness must age the oldest unshipped macOS update so continuous merges cannot reset and auto-close the alarm"
 
+  - id: parakeet-gpu-credential-gate-tests
+    command: ["python3", ".github/scripts/test_detect_gcp_credentials.py"]
+    triggers: [".github/scripts/detect_gcp_credentials.py", ".github/scripts/test_detect_gcp_credentials.py", ".github/workflows/parakeet_gpu_tests.yml", ".github/checks-manifest.yaml"]
+    lanes: ["local", "ci"]
+    reason: "nightly Parakeet GPU tests died on google-github-actions/auth when GCP_CREDENTIALS was empty; skip before auth on an unconfigured fork and keep the GKE suite fail-closed when credentials exist"
+
   - id: desktop-beta-admission-firestore-contention
     command: ["bash", "backend/testing/desktop_beta_admission/run.sh"]
     triggers: ["backend/database/desktop_update_channels.py", "backend/testing/desktop_beta_admission/**", "package.json", "package-lock.json", ".github/checks-manifest.yaml"]

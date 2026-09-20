@@ -42,6 +42,24 @@ void main() {
     expect(await listFor('user-a'), [recording]);
   });
 
+  test('a corrupt owner index fails closed instead of reassigning recordings', () async {
+    final ownersFile = File('${dir.path}/omibatch_owners.json');
+    const corrupt = '{"$recording":"user-a"';
+    await ownersFile.writeAsString(corrupt);
+
+    expect(await listFor('user-b'), isEmpty);
+    expect(await ownersFile.readAsString(), corrupt);
+    expect(File('${dir.path}/$recording').existsSync(), isTrue);
+  });
+
+  test('non-string owner values fail closed instead of being coerced', () async {
+    final ownersFile = File('${dir.path}/omibatch_owners.json');
+    await ownersFile.writeAsString('{"$recording":7}');
+
+    expect(await listFor('user-b'), isEmpty);
+    expect(File('${dir.path}/$recording').existsSync(), isTrue);
+  });
+
   test('clearing user data drops the listed recordings', () async {
     SharedPreferencesUtil().uid = 'user-a';
     final provider = LocalRecordingsProvider();

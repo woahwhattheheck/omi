@@ -133,6 +133,15 @@ class LocalRecordingsProvider extends ChangeNotifier {
       final uid = SharedPreferencesUtil().uid;
       final ownersFile = File('${dir.path}/$_ownersFileName');
       final owners = _readOwners(ownersFile);
+      if (owners == null) {
+        // Ownership metadata is the account-isolation boundary for these files.
+        // If it exists but cannot be trusted, do not reinterpret the recordings
+        // as unowned and silently bind them to whichever account is current.
+        Logger.error('LocalRecordings: owner index is unreadable; refusing to expose local recordings');
+        _recordings = [];
+        _secondsByFile.clear();
+        return;
+      }
       var ownersChanged = false;
       final list = <LocalRecording>[];
       final seen = <String>{};
@@ -164,7 +173,7 @@ class LocalRecordingsProvider extends ChangeNotifier {
       }
       final ownerCount = owners.length;
       owners.removeWhere((name, _) => !onDisk.contains(name));
-      if (ownersChanged || owners.length != ownerCount) await ownersFile.writeAsString(jsonEncode(owners));
+      if (ownersChanged || owners.length != ownerCount) await _writeOwners(ownersFile, owners);
       list.sort((a, b) => b.timerStart.compareTo(a.timerStart));
       _recordings = list;
       _secondsByFile.removeWhere((k, _) => !seen.contains(k));
@@ -505,13 +514,34 @@ class LocalRecordingsProvider extends ChangeNotifier {
 
   // ───────────────────────── sidecar ─────────────────────────
 
-  Map<String, String> _readOwners(File file) {
+  Map<String, String>? _readOwners(File file) {
+    if (!file.existsSync()) return {};
     try {
-      if (!file.existsSync()) return {};
-      final decoded = jsonDecode(file.readAsStringSync()) as Map<String, dynamic>;
-      return decoded.map((k, v) => MapEntry(k, v.toString()));
+      final decoded = jsonDecode(file.readAsStringSync());
+      if (decoded is! Map<String, dynamic>) return null;
+      final owners = <String, String>{};
+      for (final entry in decoded.entries) {
+        final owner = entry.value;
+        if (owner is! String || owner.isEmpty) return null;
+        owners[entry.key] = owner;
+      }
+      return owners;
     } catch (_) {
-      return {};
+      return null;
+    }
+  }
+
+  Future<void> _writeOwners(File file, Map<String, String> owners) async {
+    final temp = File('${file.path}.tmp');
+    try {
+      // Write+flush to a sibling first so a process death cannot truncate the
+      // last known-good owner map in place. Rename is atomic on the mobile
+      // filesystems this provider targets.
+      await temp.writeAsString(jsonEncode(owners), flush: true);
+      await temp.rename(file.path);
+    } catch (_) {
+      if (await temp.exists()) await temp.delete();
+      rethrow;
     }
   }
 

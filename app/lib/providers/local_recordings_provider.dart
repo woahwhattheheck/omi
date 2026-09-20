@@ -81,15 +81,16 @@ class LocalRecordingsProvider extends ChangeNotifier {
     BleBridge.instance.addBatchRecordingFinalizedListener(_onRecordingFinalized);
     _jobs = _loadJobs();
     // Trigger (a): auto-upload offline-fallback recordings once the initial scan
-    // is in. Trigger (b): whenever connectivity is (re)gained.
-    refresh().then((_) => _maybeAutoUpload());
+    // is in. Trigger (b): whenever connectivity is (re)gained. Reconciliation
+    // must wait for the ownership-filtered scan: persisted jobs are shared
+    // across account sessions and must never be polled for the wrong uid.
+    refresh().then((_) {
+      _maybeAutoUpload();
+      if (_hasCurrentUserJobs) _reconcile();
+    });
     _connectivitySub = ConnectivityService().onConnectionChange.listen((connected) {
       if (connected) _maybeAutoUpload();
     });
-    if (_jobs.isNotEmpty) {
-      _startReconcileTimer();
-      _reconcile();
-    }
   }
 
   /// Wired from main.dart so a finished transcription can surface its
@@ -172,9 +173,13 @@ class LocalRecordingsProvider extends ChangeNotifier {
       Logger.error('LocalRecordings: scan failed: $e');
     } finally {
       _isLoading = false;
-      // Resume polling if recordings are still awaiting transcription (e.g. the
-      // timer was dropped while backgrounded and we just resumed).
-      if (_jobs.isNotEmpty) _startReconcileTimer();
+      // Resume polling only for jobs whose recording passed the current uid's
+      // ownership filter. Other accounts' jobs stay persisted but dormant.
+      if (_hasCurrentUserJobs) {
+        _startReconcileTimer();
+      } else {
+        _stopReconcileTimer();
+      }
       if (!_disposed) notifyListeners();
     }
   }
@@ -333,6 +338,11 @@ class LocalRecordingsProvider extends ChangeNotifier {
 
   // ───────────────────────── reconcile ─────────────────────────
 
+  bool get _hasCurrentUserJobs => _recordings.any((recording) => _jobs.containsKey(recording.fileName));
+
+  @visibleForTesting
+  bool get hasCurrentUserPendingJobs => _hasCurrentUserJobs;
+
   void _startReconcileTimer() {
     _reconcileTimer ??= Timer.periodic(const Duration(seconds: 15), (_) => _reconcile());
   }
@@ -346,7 +356,11 @@ class LocalRecordingsProvider extends ChangeNotifier {
   /// conversation. `failed`/`notFound` → drop the job; the file stays on disk
   /// so it reverts to a pending, retriable recording.
   Future<void> _reconcile() async {
-    if (_jobs.isEmpty) {
+    final currentUserNames = _recordings.map((recording) => recording.fileName).toSet();
+    final currentUserJobs = Map<String, String>.fromEntries(
+      _jobs.entries.where((entry) => currentUserNames.contains(entry.key)),
+    );
+    if (currentUserJobs.isEmpty) {
       _stopReconcileTimer();
       return;
     }
@@ -354,7 +368,7 @@ class LocalRecordingsProvider extends ChangeNotifier {
     final updIds = <String>[];
     bool changed = false;
 
-    for (final entry in Map<String, String>.from(_jobs).entries) {
+    for (final entry in currentUserJobs.entries) {
       final name = entry.key;
       final jobId = entry.value;
       SyncJobFetch fetch;
@@ -391,7 +405,7 @@ class LocalRecordingsProvider extends ChangeNotifier {
     if (changed) await _saveJobs();
     if (newIds.isNotEmpty || updIds.isNotEmpty) await _surface(newIds, updIds);
     await refresh();
-    if (_jobs.isEmpty) _stopReconcileTimer();
+    if (!_hasCurrentUserJobs) _stopReconcileTimer();
   }
 
   Future<void> _surface(List<String> newIds, List<String> updatedIds) async {
@@ -517,7 +531,9 @@ class LocalRecordingsProvider extends ChangeNotifier {
 
   void clearUserData() {
     _recordings = [];
-    _jobs = {};
+    // Keep persisted/in-memory jobs so the original account can resume them
+    // when it signs back in. The ownership-filtered reconciler keeps those jobs
+    // dormant for every other account.
     _failedName = null;
     _autoFailures.clear();
     _stopReconcileTimer();

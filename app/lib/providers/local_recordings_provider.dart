@@ -356,6 +356,7 @@ class LocalRecordingsProvider extends ChangeNotifier {
   /// conversation. `failed`/`notFound` → drop the job; the file stays on disk
   /// so it reverts to a pending, retriable recording.
   Future<void> _reconcile() async {
+    final reconcileUid = SharedPreferencesUtil().uid;
     final currentUserNames = _recordings.map((recording) => recording.fileName).toSet();
     final currentUserJobs = Map<String, String>.fromEntries(
       _jobs.entries.where((entry) => currentUserNames.contains(entry.key)),
@@ -376,6 +377,13 @@ class LocalRecordingsProvider extends ChangeNotifier {
         fetch = await fetchSyncJobStatus(jobId);
       } catch (_) {
         continue; // transient — retry next tick
+      }
+      // Account state can change while the status request is in flight. Never
+      // apply A's terminal job result (file deletion or conversation surface)
+      // after the provider has switched to B.
+      if (SharedPreferencesUtil().uid != reconcileUid) {
+        _stopReconcileTimer();
+        return;
       }
       switch (fetch.outcome) {
         case SyncJobFetchOutcome.transient:
@@ -402,20 +410,30 @@ class LocalRecordingsProvider extends ChangeNotifier {
       }
     }
 
+    if (SharedPreferencesUtil().uid != reconcileUid) {
+      _stopReconcileTimer();
+      return;
+    }
     if (changed) await _saveJobs();
-    if (newIds.isNotEmpty || updIds.isNotEmpty) await _surface(newIds, updIds);
+    if (newIds.isNotEmpty || updIds.isNotEmpty) {
+      await _surface(newIds, updIds, expectedUid: reconcileUid);
+    }
     await refresh();
     if (!_hasCurrentUserJobs) _stopReconcileTimer();
   }
 
-  Future<void> _surface(List<String> newIds, List<String> updatedIds) async {
+  Future<void> _surface(List<String> newIds, List<String> updatedIds, {String? expectedUid}) async {
     if (_conversationProvider == null) return;
     if (newIds.isEmpty && updatedIds.isEmpty) return;
+    if (expectedUid != null && SharedPreferencesUtil().uid != expectedUid) return;
     try {
       final pointers = await ConversationSyncUtils.processConversationIds(
         newConversationIds: newIds,
         updatedConversationIds: updatedIds,
       );
+      // The conversation fetch itself is async, so fence again before mutating
+      // the live provider in case sign-out/sign-in occurred while it was running.
+      if (expectedUid != null && SharedPreferencesUtil().uid != expectedUid) return;
       for (final p in pointers) {
         _conversationProvider!.upsertConversation(p.conversation);
       }

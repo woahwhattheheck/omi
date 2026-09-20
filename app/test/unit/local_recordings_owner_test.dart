@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -40,6 +41,26 @@ void main() {
     expect(File('${dir.path}/$recording').existsSync(), isTrue);
 
     expect(await listFor('user-a'), [recording]);
+  });
+
+  test('another account leaves a persisted upload job dormant', () async {
+    // First sighting binds the recording to account A in the durable owner
+    // sidecar. A queued transcription job is then persisted across app restarts.
+    expect(await listFor('user-a'), [recording]);
+    await SharedPreferencesUtil().saveString('localRecordingJobs', jsonEncode({recording: 'job-a'}));
+
+    SharedPreferencesUtil().uid = 'user-b';
+    final provider = LocalRecordingsProvider();
+    await provider.refresh();
+
+    expect(provider.recordings, isEmpty);
+    expect(provider.hasCurrentUserPendingJobs, isFalse);
+
+    // Sign-out cleanup must not destroy A's resumable job just to protect B.
+    provider.clearUserData();
+    final jobs = jsonDecode(SharedPreferencesUtil().getString('localRecordingJobs')) as Map<String, dynamic>;
+    expect(jobs[recording], 'job-a');
+    provider.dispose();
   });
 
   test('clearing user data drops the listed recordings', () async {

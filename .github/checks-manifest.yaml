@@ -904,9 +904,9 @@ checks:
     reason: "drift script must treat missing health SHAs as unknown and keep --strict off the promotion path"
   - id: guardrail-pulse-tests
     command: ["python3", ".github/scripts/test_guardrail_pulse.py"]
-    triggers: [".github/scripts/guardrail_pulse.py", ".github/scripts/test_guardrail_pulse.py", ".github/workflows/guardrail-baseline-pulse.yml", ".github/guardrail-pulse-history.jsonl", ".github/checks-manifest.yaml"]
+    triggers: [".github/scripts/guardrail_pulse.py", ".github/scripts/test_guardrail_pulse.py", ".github/workflows/guardrail-baseline-pulse.yml", ".github/guardrail-pulse-history.jsonl", ".github/guardrail-staleness.md", ".github/checks-manifest.yaml"]
     lanes: ["local", "ci"]
-    reason: "#9454 weekly baseline health pulse parsing, JSONL record, and 30-day staleness detection"
+    reason: "#9454 weekly baseline health pulse parsing, JSONL record, 30-day staleness detection, and Issues-disabled in-repo tracker fallback"
   - id: dead-code-ratchet
     command: ["python3", ".github/scripts/check_dead_code.py"]
     triggers: ["app/lib/**", "app/pubspec.yaml", "backend/**/*.py", "desktop/macos/agent/**", "desktop/windows/src/**", ".github/scripts/check_dead_code.py", ".github/scripts/dead_code/**", ".github/checks-manifest.yaml"]

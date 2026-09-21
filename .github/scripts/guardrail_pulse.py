@@ -4,6 +4,9 @@
 Invokes each existing check script's counter (never reimplements counting).
 Emits one line per baseline, optional JSON, optional JSONL history append, and
 staleness detection when a nonzero count has not decreased for 30 days.
+
+When a nonzero baseline is stale, the pulse persists one tracking record:
+GitHub Issues when that road is open, otherwise a committed in-repo tracker.
 """
 
 from __future__ import annotations
@@ -11,7 +14,11 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
+import os
+import subprocess
 import sys
+import tempfile
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -29,7 +36,19 @@ import check_package_architecture_maps  # noqa: E402
 import check_version_prefixed_filenames  # noqa: E402
 
 DEFAULT_HISTORY = Path(".github/guardrail-pulse-history.jsonl")
+DEFAULT_TRACKER = Path(".github/guardrail-staleness.md")
+DEFAULT_TRACKER_TITLE = "Guardrail baseline health: stale nonzero baselines"
 STALENESS_DAYS = 30
+ISSUES_DISABLED_SNIPPETS = (
+    "has disabled issues",
+    "issues are disabled for this repo",
+    "issues disabled",
+)
+ISSUES_DISABLED_TRACKER_NOTE = (
+    "GitHub Issues are disabled on this repository, so this file is the durable tracking record."
+)
+
+GhRunner = Callable[[list[str]], str]
 
 
 @dataclass(frozen=True)
@@ -37,6 +56,19 @@ class Metric:
     name: str
     count: int
     baseline: int
+
+
+class GhError(RuntimeError):
+    def __init__(self, returncode: int, stdout: str, stderr: str) -> None:
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+        detail = stderr.strip() or stdout.strip() or f"gh exited {returncode}"
+        super().__init__(detail)
+
+    def issues_disabled(self) -> bool:
+        blob = f"{self.stdout}\n{self.stderr}".lower()
+        return any(snippet in blob for snippet in ISSUES_DISABLED_SNIPPETS)
 
 
 def _load_hyphen_module(filename: str, module_name: str):
@@ -213,6 +245,124 @@ def find_stale_metrics(
     return stale
 
 
+def default_gh_runner(args: list[str]) -> str:
+    completed = subprocess.run(
+        ["gh", *args],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if completed.returncode != 0:
+        raise GhError(completed.returncode, completed.stdout, completed.stderr)
+    return completed.stdout
+
+
+def run_gh(args: Sequence[str], *, runner: GhRunner | None = None) -> str:
+    execute = runner or default_gh_runner
+    return execute(list(args))
+
+
+def _gh_with_body(base_args: list[str], body: str, *, runner: GhRunner | None) -> str:
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".md", delete=False) as handle:
+        handle.write(body)
+        body_path = handle.name
+    try:
+        return run_gh([*base_args, "--body-file", body_path], runner=runner)
+    finally:
+        Path(body_path).unlink(missing_ok=True)
+
+
+def build_tracker_body(
+    *,
+    pulse_text: str,
+    staleness_text: str,
+    run_url: str,
+    issues_disabled: bool = False,
+) -> str:
+    lines = [
+        "Automated weekly pulse detected one or more **nonzero** guardrail baselines that have not decreased for 30 days.",
+        "",
+    ]
+    if issues_disabled:
+        lines.extend([ISSUES_DISABLED_TRACKER_NOTE, ""])
+    if run_url:
+        lines.extend([f"Run: {run_url}", ""])
+    lines.extend(
+        [
+            "## Pulse",
+            "",
+            "```",
+            pulse_text.rstrip(),
+            "```",
+            "",
+            "## Staleness",
+            "",
+            "```",
+            staleness_text.rstrip(),
+            "```",
+            "",
+            "Burn down the listed baselines (shrink the committed grandfather / pay the debt). This record is updated in place by `.github/workflows/guardrail-baseline-pulse.yml`.",
+            "",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def persist_staleness_tracker(
+    *,
+    repo: str,
+    title: str,
+    body: str,
+    comment: str,
+    tracker_path: Path,
+    runner: GhRunner | None = None,
+) -> dict[str, str]:
+    """Create or refresh the GitHub tracking issue, or write ``tracker_path`` if Issues are disabled."""
+    if not repo:
+        raise ValueError("repo is required to persist a staleness tracker")
+    try:
+        existing = run_gh(
+            [
+                "issue",
+                "list",
+                "--repo",
+                repo,
+                "--state",
+                "open",
+                "--search",
+                f"in:title {title}",
+                "--json",
+                "number,title",
+                "--jq",
+                ".[0].number // empty",
+            ],
+            runner=runner,
+        ).strip()
+        if existing:
+            _gh_with_body(["issue", "edit", existing, "--repo", repo], body, runner=runner)
+            run_gh(["issue", "comment", existing, "--repo", repo, "--body", comment], runner=runner)
+            return {"channel": "issue", "number": existing}
+        created = _gh_with_body(
+            ["issue", "create", "--repo", repo, "--title", title],
+            body,
+            runner=runner,
+        ).strip()
+        return {"channel": "issue", "url": created}
+    except GhError as exc:
+        if not exc.issues_disabled():
+            raise
+        file_body = body
+        if ISSUES_DISABLED_TRACKER_NOTE not in file_body:
+            parts = body.split("\n\n", 1)
+            if len(parts) == 2:
+                file_body = f"{parts[0]}\n\n{ISSUES_DISABLED_TRACKER_NOTE}\n\n{parts[1]}"
+            else:
+                file_body = f"{body.rstrip()}\n\n{ISSUES_DISABLED_TRACKER_NOTE}\n"
+        tracker_path.parent.mkdir(parents=True, exist_ok=True)
+        tracker_path.write_text(file_body, encoding="utf-8")
+        return {"channel": "file", "path": tracker_path.as_posix()}
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=REPO_ROOT, help="Repository root.")
@@ -244,6 +394,38 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=STALENESS_DAYS,
         help="Staleness window in days (default: 30).",
     )
+    parser.add_argument(
+        "--upsert-tracker",
+        action="store_true",
+        help="Create or refresh the staleness tracking issue, or write the in-repo tracker if Issues are disabled.",
+    )
+    parser.add_argument(
+        "--staleness-file",
+        type=Path,
+        default=None,
+        help="Text file produced by --check-staleness for the tracker body.",
+    )
+    parser.add_argument(
+        "--run-url",
+        default="",
+        help="Actions run URL recorded in the tracker body.",
+    )
+    parser.add_argument(
+        "--tracker-path",
+        type=Path,
+        default=DEFAULT_TRACKER,
+        help=f"In-repo tracker path used when Issues are disabled (default: {DEFAULT_TRACKER.as_posix()}).",
+    )
+    parser.add_argument(
+        "--tracker-title",
+        default=DEFAULT_TRACKER_TITLE,
+        help="GitHub issue title used when Issues are enabled.",
+    )
+    parser.add_argument(
+        "--repo",
+        default="",
+        help="owner/name repository for gh issue commands (default: $REPO).",
+    )
     return parser.parse_args(argv)
 
 
@@ -260,6 +442,42 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.record:
         append_history(history_path, payload)
+
+    if args.upsert_tracker:
+        pulse_text = format_text(metrics)
+        staleness_text = ""
+        if args.staleness_file is not None:
+            staleness_path = args.staleness_file
+            if not staleness_path.is_absolute():
+                staleness_path = repo_root / staleness_path
+            staleness_text = staleness_path.read_text(encoding="utf-8")
+        body = build_tracker_body(
+            pulse_text=pulse_text,
+            staleness_text=staleness_text,
+            run_url=args.run_url,
+        )
+        tracker_path = args.tracker_path
+        if not tracker_path.is_absolute():
+            tracker_path = repo_root / tracker_path
+        repo = args.repo or os.environ.get("REPO", "")
+        comment = (
+            f"Weekly pulse refreshed this tracker ({args.run_url})."
+            if args.run_url
+            else "Weekly pulse refreshed this tracker."
+        )
+        try:
+            result = persist_staleness_tracker(
+                repo=repo,
+                title=args.tracker_title,
+                body=body,
+                comment=comment,
+                tracker_path=tracker_path,
+            )
+        except GhError as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+        print(json.dumps(result, sort_keys=True))
+        return 0
 
     if args.json:
         print(json.dumps(payload, indent=2, sort_keys=True))

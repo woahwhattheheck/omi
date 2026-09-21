@@ -12,6 +12,21 @@ from pathlib import Path
 import guardrail_pulse
 
 
+class ScriptedGh:
+    def __init__(self, responses: list[tuple[str, ...]]) -> None:
+        self.calls: list[list[str]] = []
+        self._responses = list(responses)
+
+    def __call__(self, args: list[str]) -> str:
+        self.calls.append(args)
+        if not self._responses:
+            raise AssertionError(f"unexpected gh call: {args}")
+        kind, *rest = self._responses.pop(0)
+        if kind == "ok":
+            return rest[0] if rest else ""
+        raise guardrail_pulse.GhError(int(rest[0]), rest[1] if len(rest) > 1 else "", rest[2] if len(rest) > 2 else "")
+
+
 class GuardrailPulseTests(unittest.TestCase):
     def test_format_text_parses_counts(self) -> None:
         text = guardrail_pulse.format_text(
@@ -103,6 +118,112 @@ class GuardrailPulseTests(unittest.TestCase):
         encoded = json.dumps(payload)
         decoded = json.loads(encoded)
         self.assertEqual(decoded["metrics"]["brand_ui_purple"]["baseline"], 3)
+
+
+class GuardrailPulseTrackerTests(unittest.TestCase):
+    def test_issues_disabled_matches_exact_omi_log_line(self) -> None:
+        error = guardrail_pulse.GhError(
+            1,
+            "",
+            "the 'woahwhattheheck/omi' repository has disabled issues",
+        )
+        self.assertTrue(error.issues_disabled())
+        other = guardrail_pulse.GhError(1, "", "HTTP 401: Bad credentials")
+        self.assertFalse(other.issues_disabled())
+
+    def test_issues_disabled_writes_in_repo_tracker_and_does_not_raise(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tracker = Path(tmp) / "guardrail-staleness.md"
+            runner = ScriptedGh(
+                [
+                    (
+                        "err",
+                        "1",
+                        "",
+                        "the 'woahwhattheheck/omi' repository has disabled issues",
+                    )
+                ]
+            )
+            body = guardrail_pulse.build_tracker_body(
+                pulse_text="version_prefixed_files  38    (baseline 38)",
+                staleness_text="STALE: version_prefixed_files",
+                run_url="https://github.com/woahwhattheheck/omi/actions/runs/35647729331",
+            )
+            result = guardrail_pulse.persist_staleness_tracker(
+                repo="woahwhattheheck/omi",
+                title=guardrail_pulse.DEFAULT_TRACKER_TITLE,
+                body=body,
+                comment="refresh",
+                tracker_path=tracker,
+                runner=runner,
+            )
+            self.assertEqual(result["channel"], "file")
+            self.assertTrue(tracker.is_file())
+            text = tracker.read_text(encoding="utf-8")
+            self.assertIn(guardrail_pulse.ISSUES_DISABLED_TRACKER_NOTE, text)
+            self.assertIn("version_prefixed_files", text)
+            self.assertIn("35647729331", text)
+            self.assertEqual(len(runner.calls), 1)
+            self.assertEqual(runner.calls[0][0], "issue")
+
+    def test_other_gh_errors_still_fail_closed_without_writing_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tracker = Path(tmp) / "guardrail-staleness.md"
+            runner = ScriptedGh([("err", "1", "", "HTTP 403: Resource not accessible by integration")])
+            with self.assertRaises(guardrail_pulse.GhError) as caught:
+                guardrail_pulse.persist_staleness_tracker(
+                    repo="woahwhattheheck/omi",
+                    title=guardrail_pulse.DEFAULT_TRACKER_TITLE,
+                    body="body",
+                    comment="refresh",
+                    tracker_path=tracker,
+                    runner=runner,
+                )
+            self.assertFalse(caught.exception.issues_disabled())
+            self.assertFalse(tracker.exists())
+
+    def test_creates_issue_when_none_exists(self) -> None:
+        runner = ScriptedGh([("ok", ""), ("ok", "https://github.com/woahwhattheheck/omi/issues/12\n")])
+        with tempfile.TemporaryDirectory() as tmp:
+            tracker = Path(tmp) / "guardrail-staleness.md"
+            result = guardrail_pulse.persist_staleness_tracker(
+                repo="woahwhattheheck/omi",
+                title=guardrail_pulse.DEFAULT_TRACKER_TITLE,
+                body="body",
+                comment="refresh",
+                tracker_path=tracker,
+                runner=runner,
+            )
+        self.assertEqual(result["channel"], "issue")
+        self.assertIn("issues/12", result["url"])
+        self.assertFalse(tracker.exists())
+        self.assertEqual(runner.calls[1][0:2], ["issue", "create"])
+
+    def test_updates_existing_issue_in_place(self) -> None:
+        runner = ScriptedGh([("ok", "7\n"), ("ok", ""), ("ok", "")])
+        with tempfile.TemporaryDirectory() as tmp:
+            tracker = Path(tmp) / "guardrail-staleness.md"
+            result = guardrail_pulse.persist_staleness_tracker(
+                repo="woahwhattheheck/omi",
+                title=guardrail_pulse.DEFAULT_TRACKER_TITLE,
+                body="body",
+                comment="Weekly pulse refreshed this tracker.",
+                tracker_path=tracker,
+                runner=runner,
+            )
+        self.assertEqual(result, {"channel": "issue", "number": "7"})
+        self.assertEqual(runner.calls[1][0:3], ["issue", "edit", "7"])
+        self.assertEqual(runner.calls[2][0:3], ["issue", "comment", "7"])
+        self.assertFalse(tracker.exists())
+
+    def test_workflow_routes_tracker_through_python_helper(self) -> None:
+        workflow = (
+            Path(__file__).resolve().parents[1] / "workflows" / "guardrail-baseline-pulse.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn("--upsert-tracker", workflow)
+        self.assertIn("guardrail-staleness.md", workflow)
+        self.assertNotIn("gh issue create", workflow)
+        self.assertNotIn("gh issue list", workflow)
 
 
 if __name__ == "__main__":

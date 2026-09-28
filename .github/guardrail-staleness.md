@@ -2,7 +2,7 @@ Automated weekly pulse detected one or more **nonzero** guardrail baselines that
 
 GitHub Issues are disabled on this repository, so this file is the durable tracking record.
 
-Run: https://github.com/woahwhattheheck/omi/actions/runs/35649192629
+Run: https://github.com/woahwhattheheck/omi/actions/runs/36484075522
 
 ## Pulse
 

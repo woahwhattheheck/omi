@@ -1,0 +1,128 @@
+name: Exact-head haptic unit evidence
+
+on:
+  push:
+    branches:
+      - validation/omi13698-exact-haptic-20261004-rivet
+    paths:
+      - .github/workflows/verify-external-haptic-13698.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: exact-haptic-13698-rivet
+  cancel-in-progress: false
+
+jobs:
+  existing-unit-test:
+    if: github.repository == 'woahwhattheheck/omi'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      CI: 'true'
+      SOURCE_SHA: aa72ae3502a6addc275ec750d5231bd8c0f8f05e
+    steps:
+      - name: Setup repository-pinned Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: 3.44.5
+          cache: false
+
+      - name: Assemble byte-identical focused package
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence harness/lib/services harness/test/unit
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          from urllib.request import urlopen
+
+          head = os.environ['SOURCE_SHA']
+          files = {
+              'lib/services/external_haptic_trigger.dart': 'a8ea6e2c1c756502743161438476dd1c5ae06f76',
+              'test/unit/external_haptic_trigger_test.dart': 'ebf2ee1456eee612469ef6b28104589df95988da',
+          }
+          records = []
+          for name, expected in files.items():
+              url = f'https://raw.githubusercontent.com/woahwhattheheck/omi/{head}/app/{name}'
+              with urlopen(url, timeout=60) as response:
+                  data = response.read()
+              actual = hashlib.sha1(b'blob ' + str(len(data)).encode() + b'\0' + data).hexdigest()
+              if actual != expected:
+                  raise SystemExit(f'Blob mismatch for {name}: {actual} != {expected}')
+              Path('harness', name).write_bytes(data)
+              records.append({'path': f'app/{name}', 'git_blob': actual, 'sha256': hashlib.sha256(data).hexdigest(), 'bytes': len(data)})
+          pubspec = "name: omi\npublish_to: 'none'\nenvironment:\n  sdk: '>=3.0.0 <4.0.0'\ndev_dependencies:\n  flutter_test:\n    sdk: flutter\n"
+          Path('harness/pubspec.yaml').write_text(pubspec)
+          manifest = {'source_commit': head, 'flutter_pin': '3.44.5', 'scope': 'Unchanged existing unit test and self-contained production service in a minimal Flutter package; not the full app dependency graph, app CI, build, or device integration.', 'files': records}
+          Path('evidence/provenance.json').write_text(json.dumps(manifest, indent=2) + '\n')
+          print(json.dumps(manifest, indent=2))
+          PY
+          flutter --version --machine > evidence/flutter-version.json
+          uname -a > evidence/runner.txt
+          cp harness/pubspec.yaml evidence/pubspec.yaml
+
+      - name: Resolve focused Flutter dependencies
+        working-directory: harness
+        shell: bash
+        run: |
+          set -euo pipefail
+          flutter pub get 2>&1 | tee ../evidence/pub-get.log
+          cp pubspec.lock ../evidence/pubspec.lock
+
+      - name: Execute existing exact-head test
+        working-directory: harness
+        shell: bash
+        run: |
+          set -euo pipefail
+          flutter test --no-pub test/unit/external_haptic_trigger_test.dart \
+            --reporter expanded \
+            --file-reporter "json:$GITHUB_WORKSPACE/evidence/flutter-test-results.json" \
+            2>&1 | tee ../evidence/flutter-test-output.log
+
+      - name: Analyze the unchanged source and test
+        working-directory: harness
+        shell: bash
+        run: |
+          set -euo pipefail
+          flutter analyze --no-pub lib/services/external_haptic_trigger.dart \
+            test/unit/external_haptic_trigger_test.dart \
+            2>&1 | tee ../evidence/flutter-analyze.log
+
+      - name: Record bounded test result
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          events = [json.loads(line) for line in Path('evidence/flutter-test-results.json').read_text().splitlines() if line.strip()]
+          tests = {e['test']['id']: e['test']['name'] for e in events if e.get('type') == 'testStart'}
+          results = [e for e in events if e.get('type') == 'testDone' and tests.get(e.get('testID'), '').startswith('runExternalHapticTrigger ')]
+          passed = [e for e in results if e.get('result') == 'success' and not e.get('skipped')]
+          done = [e for e in events if e.get('type') == 'done']
+          if len(results) != 8 or len(passed) != 8 or not done or not done[-1].get('success'):
+              raise SystemExit(f'Unexpected terminal results: {len(results)} cases, {len(passed)} passed, done={done}')
+          summary = {'existing_cases': len(results), 'passed': len(passed), 'source_commit': os.environ['SOURCE_SHA'], 'cases': [tests[e['testID']] for e in passed], 'full_app_ci': 'not run', 'physical_device': 'not run'}
+          Path('evidence/summary.json').write_text(json.dumps(summary, indent=2) + '\n')
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as stream:
+              stream.write('## Existing exact-head haptic test\n\n8 existing cases passed using Flutter 3.44.5.\n\n')
+              stream.write('Source pin: `' + os.environ['SOURCE_SHA'] + '`. Source and test Git blob hashes were verified before execution.\n\n')
+              stream.write('Scope: isolated minimal Flutter package. This is not a full app dependency/build check, upstream CI run, device proof, or merge approval.\n')
+          print(json.dumps(summary, indent=2))
+          PY
+
+      - name: Retain execution evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: omi13698-aa72ae35-focused-unit-evidence
+          path: evidence/
+          retention-days: 14
+          if-no-files-found: error

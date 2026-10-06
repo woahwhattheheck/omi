@@ -148,7 +148,7 @@ List<_ConversationListRow> _buildConversationListRows({
   required Map<DateTime, List<ServerConversation>> conversationsByDate,
   required Map<DateTime, List<LocalRecording>> recordingsByDate,
   Map<DateTime, List<CalendarCaptureGap>> captureGapsByDate = const {},
-  Map<DateTime, ServerConversation> processingByDate = const {},
+  Map<DateTime, List<ServerConversation>> processingByDate = const {},
 }) {
   final rows = <_ConversationListRow>[];
   var hasRenderedDate = false;
@@ -158,14 +158,14 @@ List<_ConversationListRow> _buildConversationListRows({
     final conversations = conversationsByDate[date] ?? const <ServerConversation>[];
     final recordings = recordingsByDate[date] ?? const <LocalRecording>[];
     final captureGaps = captureGapsByDate[date] ?? const <CalendarCaptureGap>[];
-    final processing = processingByDate[date];
+    final processing = processingByDate[date] ?? const <ServerConversation>[];
     final entries = buildConversationGroupEntries(conversations: conversations, recordings: recordings);
     final conversationIndexes = <String, int>{
       for (var index = 0; index < conversations.length; index++) conversations[index].id: index,
     };
     // A day with only uncaptured meetings still deserves its date header —
     // the capture-gap group is the honest row for that day.
-    if (entries.isEmpty && captureGaps.isEmpty && processing == null) continue;
+    if (entries.isEmpty && captureGaps.isEmpty && processing.isEmpty) continue;
 
     if (!hasRenderedDate) {
       rows.add((
@@ -188,13 +188,15 @@ List<_ConversationListRow> _buildConversationListRows({
       conversationIndex: -1,
     ));
 
-    // Process Now belongs to the list, above the day where the completed conversation lands.
-    if (processing != null) {
+    // Processing belongs to the list, above the day where each completed conversation lands.
+    // Keep every row visible: collapsing this collection to one "newest" row strands older
+    // stalled conversations with no recovery affordance.
+    for (final pending in processing) {
       rows.add((
         kind: _ConversationListRowKind.processing,
         date: date,
         isFirst: false,
-        conversation: processing,
+        conversation: pending,
         recording: null,
         captureGap: null,
         conversationIndex: -1,
@@ -554,11 +556,18 @@ class _ConversationsPageState extends State<ConversationsPage> with AutomaticKee
         }
         final bool hasRecordings = recordingsByDate.isNotEmpty;
         final bool hasProcessingConversations = snapshot.processingConversations.isNotEmpty;
-        final processingNewest = newestProcessingConversation(snapshot.processingConversations);
-        final processingByDate = <DateTime, ServerConversation>{
-          if (processingNewest != null)
-            conversationLocalDayKey(processingNewest.startedAt ?? processingNewest.createdAt): processingNewest,
-        };
+        final processingByDate = <DateTime, List<ServerConversation>>{};
+        for (final processing in snapshot.processingConversations) {
+          final day = conversationLocalDayKey(processing.startedAt ?? processing.createdAt);
+          (processingByDate[day] ??= <ServerConversation>[]).add(processing);
+        }
+        for (final pendingForDay in processingByDate.values) {
+          pendingForDay.sort((a, b) {
+            final aTime = a.finishedAt ?? a.createdAt;
+            final bTime = b.finishedAt ?? b.createdAt;
+            return bTime.compareTo(aTime);
+          });
+        }
         final apiPhase = snapshot.apiViewPhase;
         final bool showTypedStatus = apiPhase == ApiViewPhase.error ||
             apiPhase == ApiViewPhase.locked ||

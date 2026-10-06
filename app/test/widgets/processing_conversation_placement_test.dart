@@ -96,7 +96,7 @@ void main() {
     await tester.pumpWidget(const SizedBox.shrink());
   });
 
-  testWidgets('latest Process Now replaces the displayed older processing row', (tester) async {
+  testWidgets('all processing rows stay visible across and within day groups', (tester) async {
     final provider = ConversationProvider(isSignedIn: () => false);
     addTearDown(provider.dispose);
     await pumpPage(tester, provider);
@@ -107,12 +107,16 @@ void main() {
     );
     provider.addProcessingConversation(OptimisticProcessingPlaceholder.conversation());
     await tester.pump();
-    final processing = find.byType(ProcessingConversationWidget);
-    expect(processing, findsOneWidget);
-    expect(tester.widget<ProcessingConversationWidget>(processing).conversation.id, '0');
+
+    var processing = find.byType(ProcessingConversationWidget);
+    expect(processing, findsNWidgets(2));
+    expect(
+      tester.widgetList<ProcessingConversationWidget>(processing).map((widget) => widget.conversation.id),
+      ['0', 'older'],
+    );
     expect(
       tester.widgetList<DateListItem>(find.byType(DateListItem)).map((header) => header.date),
-      [conversationLocalDayKey(now)],
+      [conversationLocalDayKey(now), conversationLocalDayKey(yesterdayNoon)],
     );
 
     provider.removeProcessingConversation('0');
@@ -121,7 +125,12 @@ void main() {
         ..status = ConversationStatus.processing,
     );
     await tester.pump();
-    expect(tester.widget<ProcessingConversationWidget>(processing).conversation.id, 'new');
+    processing = find.byType(ProcessingConversationWidget);
+    expect(processing, findsNWidgets(2));
+    expect(
+      tester.widgetList<ProcessingConversationWidget>(processing).map((widget) => widget.conversation.id),
+      ['new', 'older'],
+    );
     expect(
       tester.widgetList<DateListItem>(find.byType(DateListItem)).map((header) => header.date),
       [conversationLocalDayKey(yesterdayNoon)],
@@ -130,6 +139,8 @@ void main() {
     provider.removeProcessingConversation('new');
     await provider.addConversation(completed('new'));
     await tester.pump();
+    processing = find.byType(ProcessingConversationWidget);
+    expect(processing, findsOneWidget);
     expect(tester.widget<ProcessingConversationWidget>(processing).conversation.id, 'older');
     final dates = tester.widgetList<DateListItem>(find.byType(DateListItem)).map((header) => header.date).toList();
     expect(dates.length, 2);
